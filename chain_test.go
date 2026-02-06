@@ -1245,3 +1245,18 @@ func TestRouteMethodChaining(t *testing.T) {
 		t.Errorf("Expected 'root', got '%s'", string(body2))
 	}
 }
+
+func TestNilMiddlewarePanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Expected panic for nil middleware, got none")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "chain: nil middleware passed to Use" {
+			t.Fatalf("Expected panic message 'chain: nil middleware passed to Use', got '%v'", r)
+		}
+	}()
+
+	chain.New().Use(nil)
+}

@@ -53,6 +53,11 @@ func (m *Mux) WithMethodNotAllowed(handler http.Handler) *Mux {
 // Middleware are executed in the order they are added.
 // Returns the Mux instance for method chaining.
 func (m *Mux) Use(mw ...func(http.Handler) http.Handler) *Mux {
+	for _, fn := range mw {
+		if fn == nil {
+			panic("chain: nil middleware passed to Use")
+		}
+	}
 	m.middlewares = append(m.middlewares, mw...)
 	return m
 }
