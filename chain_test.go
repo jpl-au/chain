@@ -581,17 +581,27 @@ func TestPanicRecovery(t *testing.T) {
 }
 
 func TestNilHandlerHandling(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("Nil handler setup caused panic: %v", r)
-		}
-	}()
+	// Verify nil handlers panic at registration time with clear messages
+	t.Run("Handle", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("Expected panic for nil handler, got none")
+			}
+		}()
+		chain.New().Handle("GET /nil-test", nil)
+	})
 
+	t.Run("HandleFunc", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("Expected panic for nil handler func, got none")
+			}
+		}()
+		chain.New().HandleFunc("GET /nil-func-test", nil)
+	})
+
+	// WithNotFound and WithMethodNotAllowed accept nil (means "unset")
 	mux := chain.New()
-
-	// Verify nil handlers don't cause setup panics
-	mux.Handle("GET /nil-test", nil)
-	mux.HandleFunc("GET /nil-func-test", nil)
 	mux.WithNotFound(nil)
 	mux.WithMethodNotAllowed(nil)
 }
@@ -1259,4 +1269,64 @@ func TestNilMiddlewarePanics(t *testing.T) {
 	}()
 
 	chain.New().Use(nil)
+}
+
+func TestNilHandlerPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Expected panic for nil handler, got none")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "chain: nil handler passed to Handle" {
+			t.Fatalf("Expected panic message 'chain: nil handler passed to Handle', got '%v'", r)
+		}
+	}()
+
+	chain.New().Handle("/", nil)
+}
+
+func TestNilHandlerFuncPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Expected panic for nil handler func, got none")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "chain: nil handler passed to HandleFunc" {
+			t.Fatalf("Expected panic message 'chain: nil handler passed to HandleFunc', got '%v'", r)
+		}
+	}()
+
+	chain.New().HandleFunc("/", nil)
+}
+
+func TestNilGroupFuncPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Expected panic for nil group func, got none")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "chain: nil function passed to Group" {
+			t.Fatalf("Expected panic message 'chain: nil function passed to Group', got '%v'", r)
+		}
+	}()
+
+	chain.New().Group(nil)
+}
+
+func TestNilRouteFuncPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Expected panic for nil route func, got none")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "chain: nil function passed to Route" {
+			t.Fatalf("Expected panic message 'chain: nil function passed to Route', got '%v'", r)
+		}
+	}()
+
+	chain.New().Route("/api", nil)
 }

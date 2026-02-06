@@ -67,6 +67,9 @@ func (m *Mux) Use(mw ...func(http.Handler) http.Handler) *Mux {
 // The group inherits the parent's route prefix if one was set via Route.
 // Returns the original Mux instance for method chaining.
 func (m *Mux) Group(fn func(*Mux)) *Mux {
+	if fn == nil {
+		panic("chain: nil function passed to Group")
+	}
 	groupMux := &Mux{
 		router:      m.router,
 		middlewares: append([]func(http.Handler) http.Handler{}, m.middlewares...),
@@ -81,6 +84,9 @@ func (m *Mux) Group(fn func(*Mux)) *Mux {
 // Prefixes can be nested - a Route inside another Route will combine the prefixes.
 // Returns the original Mux instance for method chaining.
 func (m *Mux) Route(prefix string, fn func(*Mux)) *Mux {
+	if fn == nil {
+		panic("chain: nil function passed to Route")
+	}
 	groupMux := &Mux{
 		router:      m.router,
 		middlewares: append([]func(http.Handler) http.Handler{}, m.middlewares...),
@@ -94,6 +100,9 @@ func (m *Mux) Route(prefix string, fn func(*Mux)) *Mux {
 // If a route prefix is set (via Route), it will be prepended to the pattern's path.
 // Returns the Mux instance for method chaining.
 func (m *Mux) Handle(pattern string, handler http.Handler) *Mux {
+	if handler == nil {
+		panic("chain: nil handler passed to Handle")
+	}
 	m.router.Handle(m.prefixPattern(pattern), m.wrap(handler))
 	return m
 }
@@ -102,6 +111,9 @@ func (m *Mux) Handle(pattern string, handler http.Handler) *Mux {
 // If a route prefix is set (via Route), it will be prepended to the pattern's path.
 // Returns the Mux instance for method chaining.
 func (m *Mux) HandleFunc(pattern string, handlerFunc http.HandlerFunc) *Mux {
+	if handlerFunc == nil {
+		panic("chain: nil handler passed to HandleFunc")
+	}
 	m.router.Handle(m.prefixPattern(pattern), m.wrap(handlerFunc))
 	return m
 }
