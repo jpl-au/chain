@@ -13,7 +13,7 @@ Chain was inspired by [alexedwards/flow](https://github.com/alexedwards/flow/).
 ## Features
 
 - **Middleware Chaining**: Easily add request/response processing middleware
-- **Method Chaining API**: API for registering routes and middleware
+- **Fluent API**: Chain calls to register routes and middleware
 - **Response Monitoring**: Every response is wrapped so middleware can read the status code and size
 - **Route Grouping**: Group routes with their own isolated middleware stacks
 - **Custom Error Handlers**: Define custom handlers for 404 Not Found and 405 Method Not Allowed responses
@@ -45,8 +45,8 @@ func main() {
 	// Add global logging middleware
 	mux.Use(loggingMiddleware)
 
-	// Add routes
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	// Add routes. "/{$}" matches only "/" itself; a bare "/" would match every path.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Welcome to the home page!")
 	})
 
@@ -70,9 +70,9 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		log.Printf("Started %s %s", r.Method, r.URL.Path)
-		
+
 		next.ServeHTTP(w, r)
-		
+
 		log.Printf("Completed in %v", time.Since(start))
 	})
 }
@@ -85,7 +85,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -99,7 +99,7 @@ Chain provides a fluent method chaining API for a more expressive syntax:
 mux := chain.New().
     Use(loggingMiddleware).
     Use(recoverMiddleware).
-    HandleFunc("GET /", homeHandler).
+    HandleFunc("GET /{$}", homeHandler).
     HandleFunc("POST /users", createUserHandler).
     HandleFunc("GET /users/{id}", getUserHandler)
 ```
@@ -184,6 +184,8 @@ Anything the wrapper does not implement itself, such as `SetReadDeadline`, `SetW
 Set custom handlers for 404 Not Found and 405 Method Not Allowed responses. They run only when the router itself cannot route a request: no pattern matches the path (404), or a pattern matches the path but not the method (405). A handler of your own that responds with a 404 or 405 is never intercepted, so an API can return its own JSON "not found" body untouched.
 
 Custom handlers run inside the root middleware chain, so logging, recovery and similar middleware see them like any other response. On a 405 the `Allow` header listing the permitted methods is already set when your handler runs.
+
+Error handlers apply to the whole router, so they must be set on the `Mux` returned by `chain.New()`. Calling `WithNotFound` or `WithMethodNotAllowed` inside a `Group` or `Route` panics at startup rather than being silently ignored. Passing `nil` restores the standard library's response.
 
 ```go
 // Using named handler functions
@@ -275,12 +277,33 @@ mux.Route("/api", func(api *chain.Mux) {
 })
 ```
 
+### Splitting Routes Across Packages
+
+`Route` takes a `func(*chain.Mux)`, which is how routes defined in other packages are composed into one router. A package exposes a registration function and the application decides where it is mounted. The package never needs to know its own prefix:
+
+```go
+// package users
+func Routes(m *chain.Mux) {
+    m.HandleFunc("GET /{$}", listUsers)     // Registers "GET /api/users/{$}", matching only "/api/users/"
+    m.HandleFunc("GET /{id}", getUser)      // Registers "GET /api/users/{id}"
+    m.HandleFunc("POST /{$}", createUser)   // Registers "POST /api/users/{$}"
+}
+
+// package main
+mux.Route("/api/users", users.Routes)
+```
+
+This keeps a single router, so the root middleware, the custom 404 and 405 handlers, and the response wrapper all apply to every route.
+
+Use this rather than mounting a second `chain.Mux` under a prefix with `Handle`. A mounted router is a separate router, not a group: the standard library hands it the full request path, so its routes must spell out the prefix, and it has its own middleware and error handlers that the outer router's do not reach. Wrapping it in `http.StripPrefix` makes this worse, since the stripped path is what its middleware logs and its redirects point at.
+
 ## Important Notes
 
 * Chain uses the standard library's pattern matching rules and precedence, so more specific patterns take precedence over more general ones.
 * Path parameters are accessed via the standard `r.PathValue("paramName")` method.
 * Middleware is applied in the order it's registered: the first middleware registered is the outermost, so it is the first to see the request and the last to see the response.
-* Middleware should be registered before the routes it needs to affect.
+* Middleware should be registered before the routes it needs to affect. Middleware is applied to a route when the route is registered, so a later `Use` does not reach earlier routes. Responses for unmatched requests are built per request, so they always use the root's current middleware.
+* `WithNotFound` and `WithMethodNotAllowed` must be called on the root `Mux`. Calling them inside `Group` or `Route` panics.
 * Route groups create isolated middleware stacks that include parent middleware.
 * Root middleware also runs for requests that match no route, including the 404, 405 and trailing-slash redirect responses the standard library generates. Group middleware does not, since an unmatched request belongs to no group.
 * The response wrapper is always enabled, providing access to `Status()` and `Size()` in middleware. Informational `1xx` responses such as `103 Early Hints` pass straight through and do not finalise the status.

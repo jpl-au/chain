@@ -5,10 +5,12 @@ import (
 	"strings"
 )
 
-// ResponseWriter extends http.ResponseWriter with additional methods to inspect the response.
-// Middleware obtains it with [Writer]. It always satisfies http.Flusher, http.Hijacker, and http.Pusher, delegating to the
-// underlying ResponseWriter when it supports them. When it does not, Flush is a no-op
-// and Hijack and Push return http.ErrNotSupported.
+// ResponseWriter extends http.ResponseWriter with additional methods to inspect
+// the response. Middleware obtains it with [Writer].
+//
+// It always satisfies http.Flusher, http.Hijacker, and http.Pusher, delegating
+// to the underlying ResponseWriter when it supports them. When it does not,
+// Flush is a no-op and Hijack and Push return http.ErrNotSupported.
 type ResponseWriter interface {
 	http.ResponseWriter
 	// Status returns the HTTP status code of the response. It is 200 until a
@@ -52,12 +54,16 @@ func Writer(w http.ResponseWriter) (ResponseWriter, bool) {
 // It extends the standard http.ServeMux with features for applying middleware
 // to groups of routes or to the entire router.
 //
+// Create one with [New]. Unlike http.ServeMux, the zero value is not ready
+// for use.
+//
 // Routes and middleware must be registered before the Mux starts serving
 // requests; registration is not safe to perform concurrently with ServeHTTP.
 type Mux struct {
 	router           *http.ServeMux
 	middlewares      []func(http.Handler) http.Handler
 	prefix           string
+	isChild          bool // created by Group or Route rather than New
 	notFound         http.Handler
 	methodNotAllowed http.Handler
 }
@@ -73,9 +79,15 @@ func New() *Mux {
 //
 // The handler is invoked only when no registered route matches the request.
 // Responses with a 404 status written by your own handlers are left untouched.
-// The handler runs inside the root middleware chain. Returns the Mux instance
-// for chaining.
+// The handler runs inside the root middleware chain. Passing nil restores the
+// standard library's response. Returns the Mux instance for chaining.
+//
+// Error handlers apply to the whole Mux, so WithNotFound must be called on the
+// Mux returned by New. Calling it on a Mux inside Group or Route panics.
 func (m *Mux) WithNotFound(handler http.Handler) *Mux {
+	if m.isChild {
+		panic("chain: WithNotFound must be called on the root Mux, not inside Group or Route")
+	}
 	m.notFound = handler
 	return m
 }
@@ -85,9 +97,15 @@ func (m *Mux) WithNotFound(handler http.Handler) *Mux {
 // The handler is invoked only when a route matches the request path but not its
 // method. The Allow header listing the permitted methods is already set when the
 // handler runs. Responses with a 405 status written by your own handlers are left
-// untouched. The handler runs inside the root middleware chain. Returns the Mux
-// instance for chaining.
+// untouched. The handler runs inside the root middleware chain. Passing nil
+// restores the standard library's response. Returns the Mux instance for chaining.
+//
+// Error handlers apply to the whole Mux, so WithMethodNotAllowed must be called
+// on the Mux returned by New. Calling it on a Mux inside Group or Route panics.
 func (m *Mux) WithMethodNotAllowed(handler http.Handler) *Mux {
+	if m.isChild {
+		panic("chain: WithMethodNotAllowed must be called on the root Mux, not inside Group or Route")
+	}
 	m.methodNotAllowed = handler
 	return m
 }
@@ -95,6 +113,11 @@ func (m *Mux) WithMethodNotAllowed(handler http.Handler) *Mux {
 // Use appends middleware to the Mux's middleware chain.
 // Middleware are executed in the order they are added.
 // Returns the Mux instance for method chaining.
+//
+// Middleware is applied to a route when the route is registered, so it only
+// affects routes registered after it. Responses for requests that match no
+// route are built when the request arrives, so they use whatever middleware
+// the root Mux has at that time.
 func (m *Mux) Use(mw ...func(http.Handler) http.Handler) *Mux {
 	for _, fn := range mw {
 		if fn == nil {
@@ -141,6 +164,7 @@ func (m *Mux) child(prefix string) *Mux {
 		router:      m.router,
 		middlewares: append([]func(http.Handler) http.Handler{}, m.middlewares...),
 		prefix:      m.prefix + prefix,
+		isChild:     true,
 	}
 }
 

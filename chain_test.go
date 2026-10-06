@@ -665,6 +665,16 @@ func TestMux_WithNotFound(t *testing.T) {
 			t.Error("WithNotFound did not return the mux")
 		}
 	})
+
+	t.Run("panics inside a child", func(t *testing.T) {
+		const want = "chain: WithNotFound must be called on the root Mux, not inside Group or Route"
+		t.Run("Group", func(t *testing.T) {
+			expectPanic(t, want, func() { chain.New().Group(func(g *chain.Mux) { g.WithNotFound(custom) }) })
+		})
+		t.Run("Route", func(t *testing.T) {
+			expectPanic(t, want, func() { chain.New().Route("/api", func(r *chain.Mux) { r.WithNotFound(custom) }) })
+		})
+	})
 }
 
 func TestMux_WithMethodNotAllowed(t *testing.T) {
@@ -733,6 +743,16 @@ func TestMux_WithMethodNotAllowed(t *testing.T) {
 		if mux.WithMethodNotAllowed(custom) != mux {
 			t.Error("WithMethodNotAllowed did not return the mux")
 		}
+	})
+
+	t.Run("panics inside a child", func(t *testing.T) {
+		const want = "chain: WithMethodNotAllowed must be called on the root Mux, not inside Group or Route"
+		t.Run("Group", func(t *testing.T) {
+			expectPanic(t, want, func() { chain.New().Group(func(g *chain.Mux) { g.WithMethodNotAllowed(custom) }) })
+		})
+		t.Run("Route", func(t *testing.T) {
+			expectPanic(t, want, func() { chain.New().Route("/api", func(r *chain.Mux) { r.WithMethodNotAllowed(custom) }) })
+		})
 	})
 }
 

@@ -21,6 +21,10 @@
 //	mux.Use(firstMiddleware)   // Runs first (outermost)
 //	mux.Use(secondMiddleware)  // Runs second (innermost)
 //
+// Middleware is applied to a route when the route is registered, so register
+// middleware before the routes it should affect. Responses for requests that
+// match no route are built per request and use the root's current middleware.
+//
 // # Route Groups
 //
 // Groups allow middleware to be scoped to a subset of routes:
@@ -83,6 +87,10 @@
 // written by one of your own handlers is never intercepted. Custom handlers
 // run inside the root middleware chain, and on a 405 the Allow header is
 // already set.
+//
+// Error handlers apply to the whole Mux and must be set on the Mux returned by
+// [New]. Calling [Mux.WithNotFound] or [Mux.WithMethodNotAllowed] inside
+// [Mux.Group] or [Mux.Route] panics.
 //
 // # Unmatched Requests
 //
