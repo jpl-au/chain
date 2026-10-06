@@ -2,24 +2,58 @@ package chain
 
 import (
 	"net/http"
+	"strings"
 )
 
 // ResponseWriter extends http.ResponseWriter with additional methods to inspect the response.
-// It also implements http.Flusher, http.Hijacker, and http.Pusher when the underlying
-// ResponseWriter supports these interfaces.
+// Middleware obtains it with [Writer]. It always satisfies http.Flusher, http.Hijacker, and http.Pusher, delegating to the
+// underlying ResponseWriter when it supports them. When it does not, Flush is a no-op
+// and Hijack and Push return http.ErrNotSupported.
 type ResponseWriter interface {
 	http.ResponseWriter
-	// Status returns the HTTP status code of the response.
+	// Status returns the HTTP status code of the response. It is 200 until a
+	// status has been written, so check Written to tell a 200 response from
+	// one that has not been written at all.
 	Status() int
 	// Size returns the number of bytes written to the response.
 	Size() int
-	// Written returns whether the response has been written to.
+	// Written returns whether the response has been written to, or the
+	// connection hijacked.
 	Written() bool
+}
+
+// Writer returns the ResponseWriter that Mux wrapped around w, looking through
+// any intermediate wrappers that implement Unwrap() http.ResponseWriter, as
+// gzip, CORS and tracing middleware commonly do. It reports false when the
+// request did not pass through a Mux or when a wrapper in the way does not
+// implement Unwrap.
+//
+// Use it in middleware to read the response after the handler has run:
+//
+//	next.ServeHTTP(w, r)
+//	if rw, ok := chain.Writer(w); ok {
+//		log.Printf("%d %d", rw.Status(), rw.Size())
+//	}
+func Writer(w http.ResponseWriter) (ResponseWriter, bool) {
+	for w != nil {
+		if rw, ok := w.(ResponseWriter); ok {
+			return rw, true
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil, false
+		}
+		w = u.Unwrap()
+	}
+	return nil, false
 }
 
 // Mux is an HTTP request multiplexer with support for middleware chaining.
 // It extends the standard http.ServeMux with features for applying middleware
 // to groups of routes or to the entire router.
+//
+// Routes and middleware must be registered before the Mux starts serving
+// requests; registration is not safe to perform concurrently with ServeHTTP.
 type Mux struct {
 	router           *http.ServeMux
 	middlewares      []func(http.Handler) http.Handler
@@ -36,14 +70,23 @@ func New() *Mux {
 }
 
 // WithNotFound sets a custom handler for 404 Not Found responses.
-// Automatically enables the response wrapper. Returns the Mux instance for chaining.
+//
+// The handler is invoked only when no registered route matches the request.
+// Responses with a 404 status written by your own handlers are left untouched.
+// The handler runs inside the root middleware chain. Returns the Mux instance
+// for chaining.
 func (m *Mux) WithNotFound(handler http.Handler) *Mux {
 	m.notFound = handler
 	return m
 }
 
 // WithMethodNotAllowed sets a custom handler for 405 Method Not Allowed responses.
-// Automatically enables the response wrapper. Returns the Mux instance for chaining.
+//
+// The handler is invoked only when a route matches the request path but not its
+// method. The Allow header listing the permitted methods is already set when the
+// handler runs. Responses with a 405 status written by your own handlers are left
+// untouched. The handler runs inside the root middleware chain. Returns the Mux
+// instance for chaining.
 func (m *Mux) WithMethodNotAllowed(handler http.Handler) *Mux {
 	m.methodNotAllowed = handler
 	return m
@@ -70,30 +113,35 @@ func (m *Mux) Group(fn func(*Mux)) *Mux {
 	if fn == nil {
 		panic("chain: nil function passed to Group")
 	}
-	groupMux := &Mux{
-		router:      m.router,
-		middlewares: append([]func(http.Handler) http.Handler{}, m.middlewares...),
-		prefix:      m.prefix,
-	}
-	fn(groupMux)
+	fn(m.child(""))
 	return m
 }
 
 // Route creates a new routing group with a path prefix and isolated middleware.
 // All routes registered within fn will have the prefix prepended to their patterns.
 // Prefixes can be nested - a Route inside another Route will combine the prefixes.
-// Returns the original Mux instance for method chaining.
+//
+// The prefix must begin with "/". A trailing "/" is ignored, so "/api/" and
+// "/api" are equivalent. Returns the original Mux instance for method chaining.
 func (m *Mux) Route(prefix string, fn func(*Mux)) *Mux {
 	if fn == nil {
 		panic("chain: nil function passed to Route")
 	}
-	groupMux := &Mux{
+	if prefix != "" && prefix[0] != '/' {
+		panic("chain: route prefix " + prefix + " must begin with /")
+	}
+	fn(m.child(strings.TrimSuffix(prefix, "/")))
+	return m
+}
+
+// child returns a Mux sharing the router with a copy of the middleware chain
+// and the given prefix appended.
+func (m *Mux) child(prefix string) *Mux {
+	return &Mux{
 		router:      m.router,
 		middlewares: append([]func(http.Handler) http.Handler{}, m.middlewares...),
 		prefix:      m.prefix + prefix,
 	}
-	fn(groupMux)
-	return m
 }
 
 // Handle registers a handler for the given pattern with middleware applied.
@@ -119,35 +167,65 @@ func (m *Mux) HandleFunc(pattern string, handlerFunc http.HandlerFunc) *Mux {
 }
 
 // prefixPattern prepends the Mux's prefix to the pattern's path component.
-// Go 1.22 patterns can be "/path" or "METHOD /path", so we find the "/" to locate
-// where the path starts and insert the prefix there.
+// ServeMux patterns are "[METHOD ][HOST]/[PATH]", so the path starts at the
+// first "/" and the prefix is inserted there.
 func (m *Mux) prefixPattern(pattern string) string {
 	if m.prefix == "" {
 		return pattern
 	}
-
-	// Find the path component (starts at first "/")
-	pathStart := 0
-	for i, c := range pattern {
-		if c == '/' {
-			pathStart = i
-			break
-		}
+	i := strings.IndexByte(pattern, '/')
+	if i < 0 {
+		panic("chain: pattern " + pattern + " has no path to prefix")
 	}
-
-	return pattern[:pathStart] + m.prefix + pattern[pathStart:]
+	return pattern[:i] + m.prefix + pattern[i:]
 }
 
-// ServeHTTP dispatches the request to the handler whose pattern most closely matches the request URL.
-// It also handles custom 404 and 405 logic if configured.
+// ServeHTTP dispatches the request to the handler whose pattern most closely
+// matches the request URL.
+//
+// Every response passes through the root middleware chain, including the 404,
+// 405 and trailing-slash redirect responses the underlying ServeMux generates
+// when no route matches. Those are captured by the response wrapper and then
+// served through the middleware, dispatching to the handlers set with
+// WithNotFound and WithMethodNotAllowed, or replaying the standard library's
+// response unchanged when none is set.
 func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Normal path with potential interception in the wrapper
-	m.router.ServeHTTP(m.wrapWriter(w, r), r)
+	rw := wrapResponseWriter(w)
+	rw.capturing = true
+	m.router.ServeHTTP(rw, r)
+	if rw.captured != 0 {
+		m.serveUnrouted(rw, r)
+	}
 }
 
-// wrapWriter wraps the http.ResponseWriter.
-func (m *Mux) wrapWriter(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
-	return wrapResponseWriter(w, r, m.notFound, m.methodNotAllowed)
+// serveUnrouted serves a response the ServeMux generated for a request that
+// matched no route, running it through the root middleware chain.
+func (m *Mux) serveUnrouted(rw *responseWriter, r *http.Request) {
+	status, body := rw.captured, rw.capturedBody
+	rw.captured, rw.capturedBody = 0, nil
+
+	var h http.Handler
+	custom := false
+	switch {
+	case status == http.StatusNotFound && m.notFound != nil:
+		h, custom = m.notFound, true
+	case status == http.StatusMethodNotAllowed && m.methodNotAllowed != nil:
+		h, custom = m.methodNotAllowed, true
+	default:
+		// Replay the standard library's response exactly as it would have sent it.
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			w.Write(body)
+		})
+	}
+	if custom {
+		// Give the custom handler a clean slate: drop the headers http.Error set
+		// for its text/plain body. Everything else, including Allow on a 405,
+		// is preserved.
+		rw.Header().Del("Content-Type")
+		rw.Header().Del("X-Content-Type-Options")
+	}
+	m.wrap(h).ServeHTTP(rw, r)
 }
 
 // wrap applies the middleware chain to a http.Handler.
@@ -158,17 +236,12 @@ func (m *Mux) wrap(handler http.Handler) http.Handler {
 		handler = m.middlewares[i](handler)
 	}
 
-	// Return a handler that provides the right ResponseWriter to middleware
+	// Stop capturing before any middleware runs so the wrapper can tell
+	// user-written responses apart from ones the ServeMux generated.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If this is being called from ServeHTTP, w is already the wrapped writer
-		// If this is being called normally, we need to check if wrapping is needed
-
-		// Check if w is already our ResponseWriter interface
-		if _, ok := w.(ResponseWriter); !ok {
-			// Not wrapped yet, wrap it now
-			w = wrapResponseWriter(w, r, m.notFound, m.methodNotAllowed)
+		if rw, ok := w.(*responseWriter); ok {
+			rw.capturing = false
 		}
-
 		handler.ServeHTTP(w, r)
 	})
 }

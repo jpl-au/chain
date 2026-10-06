@@ -1,8 +1,8 @@
 // Package chain provides a lightweight, flexible HTTP middleware chaining solution for Go.
 //
 // Chain is a composable HTTP middleware router that provides a chainable API for organizing
-// routes and middleware. It is built on top of Go's standard [http.ServeMux] and works with
-// Go 1.22's routing enhancements, supporting HTTP method matching and path wildcards.
+// routes and middleware. It is built on top of Go's standard [http.ServeMux] and uses its
+// routing, including HTTP method matching and path wildcards.
 //
 // # Basic Usage
 //
@@ -52,16 +52,21 @@
 // # Response Wrapper
 //
 // Chain wraps all responses with a [ResponseWriter] that tracks the status code and
-// response size. Middleware can inspect these values after the handler executes:
+// response size. Middleware obtains it with [Writer] after the handler executes:
 //
 //	func loggingMiddleware(next http.Handler) http.Handler {
 //		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 //			next.ServeHTTP(w, r)
-//			if rw, ok := w.(chain.ResponseWriter); ok {
+//			if rw, ok := chain.Writer(w); ok {
 //				log.Printf("%s %s %d", r.Method, r.URL.Path, rw.Status())
 //			}
 //		})
 //	}
+//
+// [Writer] looks through other wrappers that implement Unwrap() http.ResponseWriter,
+// so it still finds the writer when gzip or tracing middleware sits in between.
+// [ResponseWriter.Status] is 200 until a status is written; use [ResponseWriter.Written]
+// to tell an unwritten response from a 200.
 //
 // The response wrapper also implements [http.Flusher], [http.Hijacker], and [http.Pusher]
 // for compatibility with SSE, WebSockets, and HTTP/2 server push.
@@ -74,9 +79,22 @@
 //		WithNotFound(notFoundHandler).
 //		WithMethodNotAllowed(methodNotAllowedHandler)
 //
+// They run only when the router itself cannot route a request. A 404 or 405
+// written by one of your own handlers is never intercepted. Custom handlers
+// run inside the root middleware chain, and on a 405 the Allow header is
+// already set.
+//
+// # Unmatched Requests
+//
+// Root middleware runs for every request, including those that match no route.
+// The 404, 405 and trailing-slash redirect responses the standard library
+// generates for such requests pass through the root middleware unchanged when
+// no custom handler is set. Group middleware does not run for them, since an
+// unmatched request belongs to no group.
+//
 // # Path Parameters
 //
-// Path parameters use Go 1.22's syntax and are accessed via [http.Request.PathValue]:
+// Path parameters use the standard library's syntax and are accessed via [http.Request.PathValue]:
 //
 //	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
 //		id := r.PathValue("id")

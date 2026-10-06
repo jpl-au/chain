@@ -6,7 +6,7 @@ A lightweight, flexible HTTP middleware chaining solution for Go
 
 Chain is a composable HTTP middleware router package that provides a chainable API for organizing your web application's routes and middleware. It is built on top of Go's standard `http.ServeMux`.
 
-Chain is designed to work with Go 1.22's new routing enhancements, supporting HTTP method matching and path wildcards in the same pattern format as the standard library. This makes it easy to transition between standard Go HTTP servers and Chain's enhanced middleware capabilities.
+Chain uses the standard library's routing, including HTTP method matching and path wildcards, in the same pattern format as `http.ServeMux`. This makes it easy to move between a plain standard library server and Chain.
 
 Chain was inspired by [alexedwards/flow](https://github.com/alexedwards/flow/).
 
@@ -14,10 +14,9 @@ Chain was inspired by [alexedwards/flow](https://github.com/alexedwards/flow/).
 
 - **Middleware Chaining**: Easily add request/response processing middleware
 - **Method Chaining API**: API for registering routes and middleware
-- **Response Monitoring**: Optional response wrapper for tracking status codes and sizes
+- **Response Monitoring**: Every response is wrapped so middleware can read the status code and size
 - **Route Grouping**: Group routes with their own isolated middleware stacks
 - **Custom Error Handlers**: Define custom handlers for 404 Not Found and 405 Method Not Allowed responses
-- **Go 1.22 Compatible**: Works with Go's new routing enhancements including method matching and path wildcards
 
 ## Installation
 
@@ -105,11 +104,11 @@ mux := chain.New().
     HandleFunc("GET /users/{id}", getUserHandler)
 ```
 
-Note that Chain follows Go 1.22's pattern matching rules, including method matching and path wildcards. You can access path parameters using `r.PathValue("id")` in your handlers.
+Chain follows the standard library's pattern matching rules, including method matching and path wildcards. You can access path parameters using `r.PathValue("id")` in your handlers.
 
 ## Path Wildcards and Parameters
 
-Chain uses Go 1.22's path parameter syntax. Access path parameters in your handlers using `r.PathValue()`:
+Chain uses the standard library's path parameter syntax. Access path parameters in your handlers using `r.PathValue()`:
 
 ```go
 // Match a specific path segment with a named parameter
@@ -139,21 +138,19 @@ The `{$}` pattern is particularly useful when you need to distinguish between a 
 
 ## Response Wrapper
 
-Enable the response wrapper to track status codes, response size, and more detailed logging:
+Every response is wrapped in a `chain.ResponseWriter`. Use `chain.Writer` in middleware to read the status code and response size after the handler runs. It looks through any other wrappers in the way, such as gzip or tracing middleware, as long as they implement `Unwrap() http.ResponseWriter`:
 
 ```go
 mux := chain.New().
-	Use(advancedLoggingMiddleware)
+	Use(loggingMiddleware)
 
-// Advanced logging middleware with response information
-func advancedLoggingMiddleware(next http.Handler) http.Handler {
+func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
 		next.ServeHTTP(w, r)
 
-		// Access response information after handler execution
-		if rw, ok := w.(chain.ResponseWriter); ok {
+		if rw, ok := chain.Writer(w); ok {
 			log.Printf(
 				"%s %s %d %d %v",
 				r.Method,
@@ -166,6 +163,8 @@ func advancedLoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 ```
+
+`Status()` reports 200 until a status is written, so a handler that writes nothing and one that writes a 200 look the same. Use `Written()` to tell them apart.
 
 ### Advanced ResponseWriter Features
 
@@ -180,7 +179,9 @@ These interfaces are automatically delegated to the underlying `http.ResponseWri
 
 ## Custom Error Handlers
 
-Set custom handlers for 404 Not Found and 405 Method Not Allowed responses. The response wrapper intercepts these status codes to execute your custom handlers:
+Set custom handlers for 404 Not Found and 405 Method Not Allowed responses. They run only when the router itself cannot route a request: no pattern matches the path (404), or a pattern matches the path but not the method (405). A handler of your own that responds with a 404 or 405 is never intercepted, so an API can return its own JSON "not found" body untouched.
+
+Custom handlers run inside the root middleware chain, so logging, recovery and similar middleware see them like any other response. On a 405 the `Allow` header listing the permitted methods is already set when your handler runs.
 
 ```go
 // Using named handler functions
@@ -274,12 +275,15 @@ mux.Route("/api", func(api *chain.Mux) {
 
 ## Important Notes
 
-* Chain uses Go 1.22's standard pattern matching rules and precedence, so more specific patterns take precedence over more general ones.
-* Path parameters are accessed via Go 1.22's standard `r.PathValue("paramName")` method.
-* Middleware is applied in the order it's registered, with innermost middleware executed first.
+* Chain uses the standard library's pattern matching rules and precedence, so more specific patterns take precedence over more general ones.
+* Path parameters are accessed via the standard `r.PathValue("paramName")` method.
+* Middleware is applied in the order it's registered: the first middleware registered is the outermost, so it is the first to see the request and the last to see the response.
 * Middleware should be registered before the routes it needs to affect.
 * Route groups create isolated middleware stacks that include parent middleware.
-* The response wrapper is always enabled, providing access to `Status()` and `Size()` in middleware.
+* Root middleware also runs for requests that match no route, including the 404, 405 and trailing-slash redirect responses the standard library generates. Group middleware does not, since an unmatched request belongs to no group.
+* The response wrapper is always enabled, providing access to `Status()` and `Size()` in middleware. Informational `1xx` responses such as `103 Early Hints` pass straight through and do not finalise the status.
+* `Route` prefixes must begin with `/`. A trailing `/` is ignored, so `Route("/api/", ...)` and `Route("/api", ...)` are equivalent.
+* Register all routes and middleware before serving. Registration is not safe to run concurrently with requests.
 
 ## License
 
@@ -287,8 +291,8 @@ MIT License
 
 ## Learn More
 
-For more information about Go 1.22's routing enhancements that Chain builds upon, see the [official Go blog post](https://go.dev/blog/routing-enhancements).
+For more information about the standard library routing that Chain builds upon, see the [official Go blog post](https://go.dev/blog/routing-enhancements).
 
 ## Acknowledgments
 
-Chain draws inspiration from [alexedwards/flow](https://github.com/alexedwards/flow/), a minimal HTTP router for Go. While Flow uses its own pattern matching syntax, Chain adopts Go 1.22's standard library approach for routing patterns, making it a natural choice for projects using Go 1.22+.
+Chain draws inspiration from [alexedwards/flow](https://github.com/alexedwards/flow/), a minimal HTTP router for Go. While Flow uses its own pattern matching syntax, Chain adopts the standard library's routing patterns.
