@@ -65,17 +65,21 @@ func (rw *responseWriter) Written() bool {
 // and do not finalise the response, matching net/http's own behaviour, so a
 // handler may send 103 Early Hints and still set the final status afterwards.
 func (rw *responseWriter) WriteHeader(status int) {
-	if status >= 100 && status <= 199 && status != http.StatusSwitchingProtocols {
+	informational := status >= 100 && status <= 199 && status != http.StatusSwitchingProtocols
+	if rw.capturing {
+		// The ServeMux is answering this request itself (404, 405 or redirect).
+		// Capture the first final status so Mux.ServeHTTP can replay it through
+		// the middleware chain. Nothing reaches the underlying writer meanwhile.
+		if !informational && rw.captured == 0 {
+			rw.captured = status
+		}
+		return
+	}
+	if informational {
 		rw.ResponseWriter.WriteHeader(status)
 		return
 	}
 	if rw.written {
-		return
-	}
-	if rw.capturing {
-		// The ServeMux is answering this request itself (404, 405 or redirect).
-		// Capture it so Mux.ServeHTTP can replay it through the middleware chain.
-		rw.captured = status
 		return
 	}
 	rw.status = status
@@ -85,7 +89,10 @@ func (rw *responseWriter) WriteHeader(status int) {
 
 // Write writes the data to the connection as part of an HTTP reply.
 func (rw *responseWriter) Write(b []byte) (int, error) {
-	if rw.captured != 0 {
+	if rw.capturing {
+		if rw.captured == 0 {
+			rw.captured = http.StatusOK // implicit, as net/http would send
+		}
 		rw.capturedBody = append(rw.capturedBody, b...)
 		return len(b), nil
 	}
@@ -109,6 +116,9 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 // so the response is marked as written with the default 200 status if no
 // status has been set yet.
 func (rw *responseWriter) Flush() {
+	if rw.capturing {
+		return // nothing has been sent, so there is nothing to flush
+	}
 	if err := http.NewResponseController(rw.ResponseWriter).Flush(); err != nil {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jpl-au/chain"
 )
@@ -977,17 +979,74 @@ func TestMux_ServeHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("streams server-sent events", func(t *testing.T) {
-		mux := chain.New().HandleFunc("GET /sse", func(w http.ResponseWriter, r *http.Request) {
+	t.Run("streams server-sent events incrementally", func(t *testing.T) {
+		// The handler sends event 2 only after the client has read event 1, so
+		// the test proves Flush delivers through the wrapper and middleware
+		// rather than the body arriving all at once when the handler returns.
+		clientGotFirst := make(chan struct{})
+		mux := chain.New().Use(setHeader("X-Logged", "on")).HandleFunc("GET /sse", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
-			for _, event := range []string{"data: event1\n\n", "data: event2\n\n"} {
-				w.Write([]byte(event))
-				w.(http.Flusher).Flush()
+			w.Write([]byte("data: event1\n\n"))
+			w.(http.Flusher).Flush()
+			select {
+			case <-clientGotFirst:
+			case <-time.After(2 * time.Second):
+				t.Error("client never acknowledged the first event: Flush did not deliver")
+				return
 			}
+			w.Write([]byte("data: event2\n\n"))
+			w.(http.Flusher).Flush()
 		})
-		got := request(t, mux, http.MethodGet, "/sse")
-		if got.header.Get("Content-Type") != "text/event-stream" || got.body != "data: event1\n\ndata: event2\n\n" {
-			t.Errorf("got Content-Type %q body %q", got.header.Get("Content-Type"), got.body)
+		srv := serve(t, mux)
+
+		resp, err := testClient.Get(srv.URL + "/sse")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+			t.Fatalf("Content-Type = %q", ct)
+		}
+		buf := make([]byte, 64)
+		n, err := resp.Body.Read(buf)
+		if err != nil || string(buf[:n]) != "data: event1\n\n" {
+			t.Fatalf("first read = %q, %v; want the first event alone", buf[:n], err)
+		}
+		close(clientGotFirst)
+		rest, err := io.ReadAll(resp.Body)
+		if err != nil || string(rest) != "data: event2\n\n" {
+			t.Fatalf("remaining body = %q, %v; want the second event", rest, err)
+		}
+	})
+
+	t.Run("hijacks the connection", func(t *testing.T) {
+		// Through a real net/http server, not a mock: after Hijack the handler
+		// owns the socket and whatever it writes reaches the client verbatim.
+		mux := chain.New().Use(setHeader("X-Logged", "on")).HandleFunc("GET /upgrade", func(w http.ResponseWriter, r *http.Request) {
+			conn, rw, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("Hijack: %v", err)
+				return
+			}
+			defer conn.Close()
+			rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\nraw bytes")
+			rw.Flush()
+		})
+		srv := serve(t, mux)
+
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		fmt.Fprint(conn, "GET /upgrade HTTP/1.1\r\nHost: x\r\n\r\n")
+		got, err := io.ReadAll(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\nraw bytes"
+		if string(got) != want {
+			t.Errorf("client received %q, want %q", got, want)
 		}
 	})
 

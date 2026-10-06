@@ -177,6 +177,8 @@ Chain's response wrapper implements standard HTTP interfaces, enabling support f
 
 These interfaces are automatically delegated to the underlying `http.ResponseWriter` when supported, making Chain compatible with SSE, WebSockets, HTTP/2 push, and other advanced HTTP features.
 
+Anything the wrapper does not implement itself, such as `SetReadDeadline`, `SetWriteDeadline` and `EnableFullDuplex`, is reached through `http.ResponseController`, which follows `Unwrap()` down to the underlying writer. Nothing in Chain needs to change as `net/http` adds new methods.
+
 ## Custom Error Handlers
 
 Set custom handlers for 404 Not Found and 405 Method Not Allowed responses. They run only when the router itself cannot route a request: no pattern matches the path (404), or a pattern matches the path but not the method (405). A handler of your own that responds with a 404 or 405 is never intercepted, so an API can return its own JSON "not found" body untouched.
