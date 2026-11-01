@@ -15,9 +15,10 @@ import (
 // root middleware chain and any custom error handlers. See Mux.ServeHTTP.
 type responseWriter struct {
 	http.ResponseWriter
-	status  int
-	size    int
-	written bool
+	status   int
+	size     int
+	written  bool
+	hijacked bool
 
 	// capturing is set by Mux.ServeHTTP while the ServeMux is dispatching and
 	// cleared as soon as a registered handler (and its middleware) is entered.
@@ -34,19 +35,31 @@ type responseWriter struct {
 
 // Compile-time interface checks
 var (
-	_ http.ResponseWriter = (*responseWriter)(nil)
-	_ http.Flusher        = (*responseWriter)(nil)
-	_ http.Hijacker       = (*responseWriter)(nil)
-	_ http.Pusher         = (*responseWriter)(nil)
-	_ ResponseWriter      = (*responseWriter)(nil)
+	_ http.ResponseWriter    = (*responseWriter)(nil)
+	_ http.Flusher           = (*responseWriter)(nil)
+	_ http.Hijacker          = (*responseWriter)(nil)
+	_ http.Pusher            = (*responseWriter)(nil)
+	_ ResponseWriter         = (*responseWriter)(nil)
+	_ HijackedResponseWriter = (*responseWriter)(nil)
 )
 
-// Status returns the HTTP status code of the response. If not yet written, it returns 200 OK.
+// Status returns the HTTP status code of the response. If not yet written, it
+// returns 200 OK. If the connection was hijacked before Chain observed a
+// status code, it returns 0 because the status written directly to the
+// connection is unknown to Chain.
 func (rw *responseWriter) Status() int {
+	if rw.hijacked && rw.status == 0 {
+		return 0
+	}
 	if rw.status == 0 {
 		return http.StatusOK
 	}
 	return rw.status
+}
+
+// Hijacked reports whether the connection was successfully hijacked.
+func (rw *responseWriter) Hijacked() bool {
+	return rw.hijacked
 }
 
 // Size returns the number of bytes written to the response.
@@ -135,6 +148,7 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	conn, buf, err := http.NewResponseController(rw.ResponseWriter).Hijack()
 	if err == nil {
 		rw.written = true
+		rw.hijacked = true
 	}
 	return conn, buf, err
 }

@@ -15,13 +15,22 @@ type ResponseWriter interface {
 	http.ResponseWriter
 	// Status returns the HTTP status code of the response. It is 200 until a
 	// status has been written, so check Written to tell a 200 response from
-	// one that has not been written at all.
+	// one that has not been written at all. If the connection was hijacked
+	// before Chain observed a status, it returns 0 (unknown).
 	Status() int
 	// Size returns the number of bytes written to the response.
 	Size() int
 	// Written returns whether the response has been written to, or the
 	// connection hijacked.
 	Written() bool
+}
+
+// HijackedResponseWriter extends ResponseWriter with the connection's hijack
+// state. Chain's response writer implements this interface.
+type HijackedResponseWriter interface {
+	ResponseWriter
+	// Hijacked reports whether the connection was successfully hijacked.
+	Hijacked() bool
 }
 
 // Writer returns the ResponseWriter that Mux wrapped around w, looking through

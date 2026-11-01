@@ -337,10 +337,11 @@ func TestResponseWriter_Flush(t *testing.T) {
 
 func TestResponseWriter_Hijack(t *testing.T) {
 	tests := []struct {
-		name        string
-		underlying  func() (http.ResponseWriter, *bool)
-		wantErr     error
-		wantWritten bool
+		name         string
+		underlying   func() (http.ResponseWriter, *bool)
+		wantErr      error
+		wantWritten  bool
+		wantHijacked bool
 	}{
 		{
 			name: "delegates and returns the underlying error",
@@ -356,7 +357,8 @@ func TestResponseWriter_Hijack(t *testing.T) {
 				m := &mockHijacker{mockWriter: newMockWriter()}
 				return m, &m.hijacked
 			},
-			wantWritten: true,
+			wantWritten:  true,
+			wantHijacked: true,
 		},
 		{
 			name: "returns ErrNotSupported when unsupported",
@@ -391,7 +393,30 @@ func TestResponseWriter_Hijack(t *testing.T) {
 			if rw.Written() != tt.wantWritten {
 				t.Errorf("Written() = %v, want %v", rw.Written(), tt.wantWritten)
 			}
+			if rw.Hijacked() != tt.wantHijacked {
+				t.Errorf("Hijacked() = %v, want %v", rw.Hijacked(), tt.wantHijacked)
+			}
+			wantStatus := http.StatusOK
+			if tt.wantHijacked {
+				wantStatus = 0
+			}
+			if got := rw.Status(); got != wantStatus {
+				t.Errorf("Status() = %d, want %d", got, wantStatus)
+			}
 		})
+	}
+}
+
+func TestResponseWriter_Hijack_PreservesObservedStatus(t *testing.T) {
+	underlying := &mockHijacker{mockWriter: newMockWriter()}
+	rw := wrapResponseWriter(underlying)
+	rw.WriteHeader(http.StatusAccepted)
+
+	if _, _, err := rw.Hijack(); err != nil {
+		t.Fatalf("Hijack() error = %v, want nil", err)
+	}
+	if got := rw.Status(); got != http.StatusAccepted {
+		t.Errorf("Status() after hijack = %d, want %d", got, http.StatusAccepted)
 	}
 }
 

@@ -151,20 +151,17 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 
 		if rw, ok := chain.Writer(w); ok {
-			log.Printf(
-				"%s %s %d %d %v",
-				r.Method,
-				r.URL.Path,
-				rw.Status(),
-				rw.Size(),
-				time.Since(start),
-			)
+			if hrw, ok := rw.(chain.HijackedResponseWriter); ok && hrw.Hijacked() && rw.Status() == 0 {
+				log.Printf("%s %s status=unknown (hijacked) %d %v", r.Method, r.URL.Path, rw.Size(), time.Since(start))
+			} else {
+				log.Printf("%s %s status=%d %d %v", r.Method, r.URL.Path, rw.Status(), rw.Size(), time.Since(start))
+			}
 		}
 	})
 }
 ```
 
-`Status()` reports 200 until a status is written, so a handler that writes nothing and one that writes a 200 look the same. Use `Written()` to tell them apart.
+`Status()` reports 200 until a status is written, so a handler that writes nothing and one that writes a 200 look the same. Use `Written()` to tell them apart. If the connection is hijacked before Chain observes a status, `Status()` returns `0` (unknown); the writer also implements `chain.HijackedResponseWriter`, whose `Hijacked()` method reports that state. Chain cannot observe the HTTP response written directly to a hijacked connection.
 
 ### Advanced ResponseWriter Features
 

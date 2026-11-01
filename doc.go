@@ -62,7 +62,11 @@
 //		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 //			next.ServeHTTP(w, r)
 //			if rw, ok := chain.Writer(w); ok {
-//				log.Printf("%s %s %d", r.Method, r.URL.Path, rw.Status())
+//				if hrw, ok := rw.(chain.HijackedResponseWriter); ok && hrw.Hijacked() && rw.Status() == 0 {
+//					log.Printf("%s %s status=unknown (hijacked)", r.Method, r.URL.Path)
+//				} else {
+//					log.Printf("%s %s status=%d", r.Method, r.URL.Path, rw.Status())
+//				}
 //			}
 //		})
 //	}
@@ -70,7 +74,10 @@
 // [Writer] looks through other wrappers that implement Unwrap() http.ResponseWriter,
 // so it still finds the writer when gzip or tracing middleware sits in between.
 // [ResponseWriter.Status] is 200 until a status is written; use [ResponseWriter.Written]
-// to tell an unwritten response from a 200.
+// to tell an unwritten response from a 200. If the connection is hijacked before
+// Chain observes a status, Status returns 0 (unknown). [HijackedResponseWriter.Hijacked]
+// reports a successful hijack; Chain cannot observe responses written directly
+// to the hijacked connection.
 //
 // The response wrapper also implements [http.Flusher], [http.Hijacker], and [http.Pusher]
 // for compatibility with SSE, WebSockets, and HTTP/2 server push.

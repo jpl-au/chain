@@ -1,9 +1,19 @@
 package chain
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"testing"
 )
+
+type fuzzHijackWriter struct {
+	*mockFlusher
+}
+
+func (w *fuzzHijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, nil
+}
 
 // FuzzResponseWriter drives random call sequences at the wrapper and checks
 // its invariants against a simple model of what the underlying writer should
@@ -12,11 +22,13 @@ import (
 //	0: WriteHeader(final status)   1: WriteHeader(1xx)   2: Write(body)
 //	3: Flush                       4: stop capturing (a route was entered,
 //	                                  or a captured response is being replayed)
+//	0xff: Hijack (terminal; only when not capturing)
 //
 // Invariants checked: the underlying writer receives at most one final
 // status; nothing reaches it while capturing; the first final status wins
 // in both modes; Size() counts only forwarded bytes; Written() is true
-// exactly when something reached the underlying writer.
+// when a response reached the underlying writer or the connection was
+// hijacked.
 func FuzzResponseWriter(f *testing.F) {
 	f.Add(false, []byte{0, 2})
 	f.Add(false, []byte{2})
@@ -28,9 +40,12 @@ func FuzzResponseWriter(f *testing.F) {
 	f.Add(true, []byte{2})
 	f.Add(true, []byte{0, 0})
 	f.Add(true, []byte{1, 0})
+	f.Add(false, []byte{0xff})
+	f.Add(false, []byte{0, 0xff})
+	f.Add(true, []byte{4, 0xff})
 
 	f.Fuzz(func(t *testing.T, capturing bool, ops []byte) {
-		mock := &mockFlusher{mockWriter: newMockWriter()}
+		mock := &fuzzHijackWriter{mockFlusher: &mockFlusher{mockWriter: newMockWriter()}}
 		rw := wrapResponseWriter(mock)
 		rw.capturing = capturing
 
@@ -40,6 +55,7 @@ func FuzzResponseWriter(f *testing.F) {
 			forwarded    int  // bytes that reached the underlying writer
 			firstStatus  int  // first final status the wrapper accepted (captured or written)
 			captured     bool // a final status was captured while capturing
+			hijacked     bool
 		)
 		for i, op := range ops {
 			status := http.StatusNotFound
@@ -48,40 +64,52 @@ func FuzzResponseWriter(f *testing.F) {
 			}
 			wasCapturing := rw.capturing
 			beforeStatus, beforeBody, beforeFlushed := mock.status, len(mock.body), mock.flushed
-			switch op % 5 {
-			case 0:
-				rw.WriteHeader(status)
-				if firstStatus == 0 {
-					firstStatus = status
-					captured = wasCapturing
+			if op == 0xff {
+				if !wasCapturing {
+					if _, _, err := rw.Hijack(); err != nil {
+						t.Fatalf("Hijack() error = %v", err)
+					}
+					hijacked = true
 				}
-			case 1:
-				rw.WriteHeader(http.StatusEarlyHints)
-			case 2:
-				rw.Write([]byte("abc"))
-				if firstStatus == 0 {
-					// An implicit 200, exactly as net/http would send.
-					firstStatus = http.StatusOK
-					captured = wasCapturing
+			} else {
+				switch op % 5 {
+				case 0:
+					rw.WriteHeader(status)
+					if firstStatus == 0 {
+						firstStatus = status
+						captured = wasCapturing
+					}
+				case 1:
+					rw.WriteHeader(http.StatusEarlyHints)
+				case 2:
+					rw.Write([]byte("abc"))
+					if firstStatus == 0 {
+						// An implicit 200, exactly as net/http would send.
+						firstStatus = http.StatusOK
+						captured = wasCapturing
+					}
+				case 3:
+					rw.Flush()
+					// A flush sends an implicit 200 when nothing has been written yet.
+					// While capturing there is nothing to flush, so it commits nothing.
+					if firstStatus == 0 && !wasCapturing {
+						firstStatus = http.StatusOK
+					}
+				case 4:
+					// Mux.ServeHTTP hands a captured response to serveUnrouted, which
+					// clears the capture before the replay enters a route and stops
+					// capturing. Model that transition: the replay is a fresh response.
+					// Capturing only ever stops once, so this is a no-op afterwards.
+					if !rw.capturing {
+						break
+					}
+					rw.captured, rw.capturedBody = 0, nil
+					rw.capturing = false
+					firstStatus, captured = 0, false
 				}
-			case 3:
-				rw.Flush()
-				// A flush sends an implicit 200 when nothing has been written yet.
-				// While capturing there is nothing to flush, so it commits nothing.
-				if firstStatus == 0 && !wasCapturing {
-					firstStatus = http.StatusOK
-				}
-			case 4:
-				// Mux.ServeHTTP hands a captured response to serveUnrouted, which
-				// clears the capture before the replay enters a route and stops
-				// capturing. Model that transition: the replay is a fresh response.
-				// Capturing only ever stops once, so this is a no-op afterwards.
-				if !rw.capturing {
-					break
-				}
-				rw.captured, rw.capturedBody = 0, nil
-				rw.capturing = false
-				firstStatus, captured = 0, false
+			}
+			if hijacked {
+				break
 			}
 			if mock.status != beforeStatus && mock.status >= 200 {
 				finalHeaders++
@@ -97,6 +125,19 @@ func FuzzResponseWriter(f *testing.F) {
 		}
 		if rw.Size() != forwarded {
 			t.Fatalf("Size() = %d, but %d bytes reached the underlying writer", rw.Size(), forwarded)
+		}
+		if hijacked {
+			if !rw.Hijacked() || !rw.Written() {
+				t.Fatalf("successful hijack state: Hijacked()=%v Written()=%v", rw.Hijacked(), rw.Written())
+			}
+			wantStatus := 0 // no HTTP status was observed before the hijack
+			if firstStatus != 0 {
+				wantStatus = firstStatus
+			}
+			if got := rw.Status(); got != wantStatus {
+				t.Fatalf("Status() after hijack = %d, want %d", got, wantStatus)
+			}
+			return
 		}
 		if captured {
 			if rw.captured != firstStatus {
